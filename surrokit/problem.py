@@ -7,6 +7,7 @@ their side and keep their units to themselves.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -38,14 +39,25 @@ class Problem:
     """Search-space declaration: box bounds, integer dims, per-axis noise
     sigma (ABSOLUTE, in the client's Y-space; None = free MLL noise),
     optional budget Constraint (required by the constrained_max picker).
+
+    features: optional function of the knobs whose outputs the GP gets as
+    extra inputs -- quantities the client knows the response depends on,
+    so the GP need not learn them from the rows. Torch in, torch out:
+    (..., n, d) knobs in the client's units -> (..., n, k), any leading
+    batch dimensions, differentiable (flat regions are fine). The pickers
+    still search the knobs alone.
     """
     bounds_lo: tuple[float, ...]
     bounds_hi: tuple[float, ...]
     int_dims: tuple[int, ...] = ()
     noise: tuple[float, ...] | None = None
     constraint: Constraint | None = None
+    features: Callable | None = None
 
     def __post_init__(self):
+        if self.features is not None and not callable(self.features):
+            raise ValueError(
+                f"features must be callable, got {type(self.features).__name__}")
         if len(self.bounds_lo) != len(self.bounds_hi):
             raise ValueError(
                 f"bounds length mismatch: {len(self.bounds_lo)} lo vs "

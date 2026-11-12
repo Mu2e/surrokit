@@ -65,10 +65,13 @@ while holding beam-flash damage under the deployed target's budget.
 
 ## API
 
-- `Problem(bounds_lo, bounds_hi, int_dims=(), noise=None, constraint=None)`
+- `Problem(bounds_lo, bounds_hi, int_dims=(), noise=None, constraint=None,
+  features=None)`
   — the search box. `noise` = ABSOLUTE per-axis sigma, which pins a
   fixed-noise GP; strongly recommended when you have replicate
   measurements, since a free-noise fit can erase a real optimum.
+  `features` = an optional function of the knobs whose outputs the GP
+  gets as extra inputs; see "Tell the GP what you know" below.
 - `Constraint(axis, min, k_sigma=1.0)` — lower bound on one output
   axis, feasible when `mean - k_sigma*sigma >= min`. Honored ONLY by the
   `constrained_max` picker; `fit`, `predict`, and the other pickers ignore
@@ -98,6 +101,32 @@ prob = Problem(bounds_lo=(0, 0), bounds_hi=(1, 10),
 Y = [[f_i, -math.log10(g_i)] for f_i, g_i in observations]
 picks = ask(prob, X, Y, q=5, picker="constrained_max", seed=run_seed)
 ```
+
+### Tell the GP what you know
+
+When the response depends on a quantity you can compute from the knobs
+(a volume, a mass, a ratio), pass it as `features`. The GP gets it as an
+extra input and does not have to learn it from the rows. The pickers
+still search, and return, the knobs alone.
+
+```python
+def volume(X):                       # (..., n, d) -> (..., n, k)
+    return (X[..., 0] ** 2 * X[..., 1]).unsqueeze(-1)
+
+prob = Problem(bounds_lo=(1, 1), bounds_hi=(5, 20), features=volume)
+```
+
+- Torch in, torch out, and differentiable: the acquisition optimizer
+  takes gradients through it. Flat regions (a clipped value) are fine.
+- It must keep leading batch dimensions: index with `X[..., i]`, never
+  `X[:, i]`.
+- Knobs arrive in your units. Each feature is scaled by its range over
+  a fixed sample of the knob box, so the scaling does not depend on the
+  history.
+- `fit` raises `ValueError` for a wrong output shape, a non-finite
+  value inside the box, or a feature that is constant over the box.
+- A plain function works in-process. `features=None` (the default)
+  leaves the fit exactly as it was.
 
 ## Serve your problems over MCP
 

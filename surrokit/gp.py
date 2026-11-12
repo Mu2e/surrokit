@@ -1,5 +1,9 @@
 """Fixed-noise SingleTaskGP fit + posterior predict.
 
+Problem.features, when set, become extra GP inputs: an input transform
+inside the model appends them to the knobs, so every caller -- predict,
+the pickers, the acquisition optimizer -- keeps working in knob space.
+
 float64 on CPU throughout: histories are small (hundreds of rows), CPU
 beats GPU including transfer, and float64 keeps optimizer paths
 deterministic. The library never touches torch's global default dtype.
@@ -46,10 +50,75 @@ def fit(problem: Problem, X, Y):
                          f"{Yt.shape[1]} output axes")
     if Xt.shape[0] < 2:
         raise NotEnoughData(f"{Xt.shape[0]} history rows; need >= 2 to fit")
-    return _fit_model(Xt, Yt, bounds_tensor(problem), problem.noise)
+    return _fit_model(Xt, Yt, bounds_tensor(problem), problem.noise,
+                      problem.features)
 
 
-def _fit_model(X, Y, bounds, noise):
+# Knob-box sample that fixes the feature scaling: a property of the
+# problem, not of the history, so two rows scale like two hundred.
+FEATURE_RANGE_SAMPLES = 4096
+
+
+def _feature_bounds(features, bounds) -> torch.Tensor:
+    """(2, k) range of `features` over a fixed Sobol sample of the knob
+    box. Raises ValueError for a function that does not return finite
+    (..., n, k), ignores leading batch dimensions, or has a constant
+    output."""
+    from torch.quasirandom import SobolEngine
+
+    d = bounds.shape[-1]
+    unit = SobolEngine(d, scramble=True, seed=0).draw(
+        FEATURE_RANGE_SAMPLES, dtype=bounds.dtype)
+    S = bounds[0] + unit * (bounds[1] - bounds[0])
+    F = features(S)
+    if (not isinstance(F, torch.Tensor) or F.ndim != 2
+            or F.shape[0] != S.shape[0] or F.shape[1] < 1):
+        got = tuple(F.shape) if isinstance(F, torch.Tensor) else type(F).__name__
+        raise ValueError(f"features must map (n, {d}) knobs to an (n, k) "
+                         f"tensor, got {got} for n={S.shape[0]}")
+    if not torch.isfinite(F).all():
+        raise ValueError("features returned a non-finite value inside the "
+                         "knob box")
+    k = F.shape[1]
+    Fb = features(S[:6].reshape(2, 3, d))
+    if (not isinstance(Fb, torch.Tensor) or Fb.shape != (2, 3, k)
+            or not torch.allclose(Fb, F[:6].reshape(2, 3, k))):
+        raise ValueError("features must keep leading batch dimensions: "
+                         f"(2, 3, {d}) knobs must give (2, 3, {k})")
+    lo, hi = F.min(dim=0).values, F.max(dim=0).values
+    flat = (hi - lo) <= 0
+    if flat.any():
+        raise ValueError(f"feature(s) {torch.nonzero(flat).flatten().tolist()} "
+                         "are constant over the knob box")
+    return torch.stack([lo, hi], dim=0).to(bounds)
+
+
+def _input_transform(bounds, features):
+    """Normalize the knobs; with features, append them first and
+    normalize knobs and features together."""
+    from botorch.models.transforms.input import (ChainedInputTransform,
+                                                 InputTransform, Normalize)
+
+    class Append(InputTransform, torch.nn.Module):
+        # botorch's AppendFeatures is for perturbation sets (it grows
+        # the n axis); this one only widens the last axis.
+        transform_on_train = True
+        transform_on_eval = True
+        transform_on_fantasize = True
+
+        def transform(self, X):
+            return torch.cat([X, features(X)], dim=-1)
+
+    d = bounds.shape[-1]
+    if features is None:
+        return Normalize(d=d, bounds=bounds)
+    full = torch.cat([bounds, _feature_bounds(features, bounds)], dim=-1)
+    return ChainedInputTransform(
+        append=Append(),
+        normalize=Normalize(d=full.shape[-1], bounds=full))
+
+
+def _fit_model(X, Y, bounds, noise, features=None):
     """Fit a SingleTaskGP (input Normalize + outcome Standardize).
 
     noise (ABSOLUTE per-output sigma) squares into train_Yvar -> a
@@ -59,7 +128,6 @@ def _fit_model(X, Y, bounds, noise):
     """
     from botorch.fit import fit_gpytorch_mll
     from botorch.models import SingleTaskGP
-    from botorch.models.transforms.input import Normalize
     from botorch.models.transforms.outcome import Standardize
     from gpytorch.mlls import ExactMarginalLogLikelihood
 
@@ -76,7 +144,7 @@ def _fit_model(X, Y, bounds, noise):
         train_X=X,
         train_Y=Y,
         train_Yvar=train_Yvar,
-        input_transform=Normalize(d=X.shape[-1], bounds=bounds),
+        input_transform=_input_transform(bounds, features),
         outcome_transform=Standardize(m=m),
     )
     mll = ExactMarginalLogLikelihood(model.likelihood, model)
