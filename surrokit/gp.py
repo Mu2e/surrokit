@@ -29,6 +29,11 @@ DEVICE = torch.device("cpu")
 # so they are deterministic and never touch the caller's torch stream.
 FIT_EXTRA_STARTS = 4
 FIT_SEED = 0
+# An extra start replaces the default only if it lowers the MAP objective
+# (botorch's loss, per training point) by more than this: most fits reach
+# the same optimum from every start, and a 1e-6 "win" would change the
+# model where nothing was trapped.
+FIT_MIN_GAIN = 1e-3
 
 
 def to_f64(a) -> torch.Tensor:
@@ -148,8 +153,10 @@ def _fit_multistart(mll) -> None:
     mode, botorch's own retry policy, the global RNG), so where it wins
     the model is the single-start model. Starts 1.. reset to the initial
     state and draw from the priors under torch.manual_seed(FIT_SEED) in a
-    forked RNG. A start that raises, or that botorch judges unconverged,
-    is skipped and counted; ModelFittingError if every start fails.
+    forked RNG. The lowest objective wins, but start 0 is kept unless a
+    later start beats it by more than FIT_MIN_GAIN. A start that raises,
+    or that botorch judges unconverged, is skipped and counted;
+    ModelFittingError if every start fails.
     """
     from botorch.exceptions.errors import ModelFittingError
     from botorch.fit import fit_gpytorch_mll
@@ -187,6 +194,8 @@ def _fit_multistart(mll) -> None:
         ) from failed[-1][1]
     # min() keeps the first of equal losses, i.e. the lowest start index.
     loss, best, state = min(fits, key=lambda f: f[0])
+    if fits[0][1] == 0 and fits[0][0] - loss <= FIT_MIN_GAIN:
+        loss, best, state = fits[0]
     mll.train()
     mll.load_state_dict(state)
     mll.eval()

@@ -80,7 +80,8 @@ while holding beam-flash damage under the deployed target's budget.
   `fit` fits the GP hyperparameters from 5 starts: the default start
   (the prior mode, exactly as a single fit), then 4 starts drawn from
   the hyperparameter priors, and keeps the fit with the best MAP
-  objective. The 4 draws use their own fixed seed in a forked RNG, so
+  objective; the default fit stays unless another start beats it by
+  more than `FIT_MIN_GAIN` (1e-3 per training point). The 4 draws use their own fixed seed in a forked RNG, so
   `fit` is deterministic and leaves torch's global RNG as a single fit
   would. A start that fails is skipped; `fit` raises only when all 5
   fail. Each fit logs, at INFO, which start won, the noise and the

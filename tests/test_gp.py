@@ -193,6 +193,18 @@ class TestMultiStartFit(unittest.TestCase):
         multi = _loss(fit(feature_problem(), X, Y))
         self.assertLess(multi, single - 0.05)
 
+    def test_default_start_kept_without_a_real_gain(self):
+        # A start must beat the default by more than FIT_MIN_GAIN; with an
+        # unreachable margin the fit is exactly the single-start fit.
+        X, Y = feature_rows(12, seed=0)
+        torch.manual_seed(0)
+        single = _single_start_fit(feature_problem(), X, Y).state_dict()
+        torch.manual_seed(0)
+        with mock.patch.object(gp, "FIT_MIN_GAIN", 1e9):
+            multi = fit(feature_problem(), X, Y).state_dict()
+        for k in single:
+            self.assertTrue(torch.equal(single[k], multi[k]), k)
+
     def test_global_rng_state_as_without_extra_starts(self):
         X, Y = history(10)
         torch.manual_seed(7)
