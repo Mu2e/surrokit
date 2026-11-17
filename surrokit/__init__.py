@@ -3,7 +3,7 @@ from .gp import fit, lengthscales, predict
 from .pickers import PICKER_CHOICES, ask
 from .problem import Constraint, InfeasibleError, NotEnoughData, Problem
 
-__version__ = "0.1.0"
+__version__ = "1.2.0"
 
 __all__ = ["Constraint", "InfeasibleError", "NotEnoughData", "Problem",
            "PICKER_CHOICES", "ask", "fit", "lengthscales", "predict",
