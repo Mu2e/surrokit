@@ -118,6 +118,26 @@ def _input_transform(bounds, features):
         normalize=Normalize(d=full.shape[-1], bounds=full))
 
 
+def lengthscales(model):
+    """Fitted lengthscales as a numpy array (m, d_in): one row per output,
+    one column per GP input in the model's normalized input units (the
+    knobs, then any Problem.features). Raises TypeError for a covariance
+    that is not a single ARD kernel with one lengthscale per input."""
+    ck = getattr(model, "covar_module", None)
+    if ck is None or not getattr(ck, "has_lengthscale", False):
+        raise TypeError("lengthscales() needs a model whose covar_module "
+                        "has lengthscales (e.g. an ARD RBF kernel), got "
+                        f"{type(ck).__name__}")
+    ls = ck.lengthscale.detach()
+    m, d_in = model.num_outputs, ck.ard_num_dims
+    want = (1, d_in) if m == 1 else (m, 1, d_in)
+    if d_in is None or tuple(ls.shape) != want:
+        raise TypeError(f"unexpected lengthscale shape {tuple(ls.shape)} "
+                        f"for {m} output(s) and ard_num_dims={d_in}; "
+                        f"expected {want}")
+    return ls.reshape(m, d_in).cpu().numpy()
+
+
 def _fit_model(X, Y, bounds, noise, features=None):
     """Fit a SingleTaskGP (input Normalize + outcome Standardize).
 
@@ -159,6 +179,16 @@ def _fit_model(X, Y, bounds, noise, features=None):
     src = "FIXED (problem.noise)" if train_Yvar is not None else "MLL-fitted"
     log.info("GP noise sigma per output [%s]: raw=%s standardized=%s",
              src, raw, [f"{v:.3f}" for v in noise_std.tolist()])
+    # Lengthscale audit, in normalized input units (the knob box is
+    # [0, 1] per knob). Knobs x0.., then features f0.. (no names).
+    ls = lengthscales(model)
+    d = bounds.shape[-1]
+    names = ([f"x{i}" for i in range(d)]
+             + [f"f{j}" for j in range(ls.shape[1] - d)])
+    log.info("GP lengthscales per output (normalized inputs): %s",
+             "; ".join(f"out{i} " + " ".join(
+                 f"{n}={v:.3g}" for n, v in zip(names, row))
+                 for i, row in enumerate(ls)))
     return model
 
 

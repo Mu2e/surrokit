@@ -1,9 +1,14 @@
 import unittest
 
+import numpy as np
 import torch
 
-from surrokit import Constraint, NotEnoughData, Problem, fit, predict
+from surrokit import (Constraint, NotEnoughData, Problem, fit, lengthscales,
+                      predict)
 from tests.common import PROB, history
+from tests.test_features import problem as feature_problem
+from tests.test_features import product
+from tests.test_features import rows as feature_rows
 
 
 class TestFit(unittest.TestCase):
@@ -82,3 +87,58 @@ class TestNoiseLengthValidation(unittest.TestCase):
                 fit(prob, X, Y)
 
 
+# One output: noise sliced with Y, as a sob-only client does.
+PROB1 = Problem(bounds_lo=(0.0, 0.0), bounds_hi=(1.0, 10.0), noise=(0.01,))
+
+
+class TestLengthscales(unittest.TestCase):
+    def test_two_outputs(self):
+        X, Y = history(10)
+        ls = lengthscales(fit(PROB, X, Y))
+        self.assertIsInstance(ls, np.ndarray)
+        self.assertEqual(ls.shape, (2, 2))
+        self.assertTrue((ls > 0).all())
+
+    def test_one_output(self):
+        X, Y = history(10)
+        ls = lengthscales(fit(PROB1, X, [[r[0]] for r in Y]))
+        self.assertEqual(ls.shape, (1, 2))
+        self.assertTrue((ls > 0).all())
+
+    def test_features_add_columns(self):
+        X, Y = feature_rows(12, seed=0)
+        ls = lengthscales(fit(feature_problem(product), X, Y))
+        self.assertEqual(ls.shape, (2, 5))  # 4 knobs + 1 feature
+        self.assertTrue((ls > 0).all())
+
+    def test_matches_the_kernel(self):
+        X, Y = history(10)
+        model = fit(PROB, X, Y)
+        np.testing.assert_array_equal(
+            lengthscales(model),
+            model.covar_module.lengthscale.detach().reshape(2, 2).numpy())
+
+    def test_unexpected_kernel_raises(self):
+        from gpytorch.kernels import ScaleKernel
+        X, Y = history(10)
+        model = fit(PROB, X, Y)
+        model.covar_module = ScaleKernel(model.covar_module)
+        with self.assertRaisesRegex(TypeError, "lengthscale"):
+            lengthscales(model)
+
+    def test_fit_logs_lengthscales(self):
+        X, Y = history(10)
+        with self.assertLogs("surrokit", level="INFO") as cm:
+            fit(PROB, X, Y)
+        line = [m for m in cm.output if "GP lengthscales" in m]
+        self.assertEqual(len(line), 1, cm.output)
+        for token in ("out0 x0=", "out1 x0=", "x1="):
+            self.assertIn(token, line[0])
+
+    def test_fit_logs_feature_lengthscales(self):
+        X, Y = feature_rows(12, seed=0)
+        with self.assertLogs("surrokit", level="INFO") as cm:
+            fit(feature_problem(product), X, Y)
+        line = [m for m in cm.output if "GP lengthscales" in m][0]
+        self.assertIn("x3=", line)
+        self.assertIn("f0=", line)
