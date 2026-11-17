@@ -20,8 +20,9 @@ log = logging.getLogger("surrokit")
 PICKER_CHOICES = ("qnehvi", "qlnei", "qnparego", "hybrid", "constrained_max")
 
 # Acquisition-optimization budget -- ONE tuning point for every picker.
-ACQ_NUM_RESTARTS = 16
-ACQ_RAW_SAMPLES = 512
+# Restarts and raw samples are Ax 1.x's optimize_acqf defaults (20 / 1024).
+ACQ_NUM_RESTARTS = 20
+ACQ_RAW_SAMPLES = 1024
 ACQ_OPTIONS = {"batch_limit": 5, "maxiter": 200}
 
 # Defaults shared by ask(), its helpers and the MCP scaffold's stateless
