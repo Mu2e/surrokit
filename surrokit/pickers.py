@@ -261,8 +261,30 @@ def _qnparego(model, X, Y, bounds, q: int, seed: int, pending=None):
 
 def _hybrid(model, X, Y, bounds, q: int, seed: int, pending=None,
             hv_frac: float = DEFAULT_HV_FRAC):
-    """One batch = hv_frac qnehvi + rest qnparego; parego conditions on
-    the qnehvi picks via pending so the halves don't collide."""
+    """Mix qnehvi and qnparego in proportion hv_frac.
+
+    q > 1: one batch = round(hv_frac * q) qnehvi picks + the rest
+    qnparego; parego conditions on the qnehvi picks via pending so the
+    halves don't collide.
+
+    q == 1 (a closed loop that asks one point per launch): the split
+    above would always round to pure qnehvi, so instead the ONE pick
+    comes from qnehvi with probability hv_frac, else qnparego. The draw
+    is one torch.rand from a dedicated Generator seeded with `seed`:
+    a deterministic function of the seed that never touches torch's
+    global stream. hv_frac 0 / 1 give pure qnparego / qnehvi.
+    """
+    if q == 1:
+        u = float(torch.rand(1, generator=torch.Generator().manual_seed(seed),
+                             dtype=torch.float64))
+        use_hv = u < hv_frac
+        log.info("hybrid q=1: draw %.4f vs hv_frac %.3g -> %s", u, hv_frac,
+                 "qnehvi" if use_hv else "qnparego")
+        if use_hv:
+            return _qnehvi(model, X, Y, bounds, q=1, seed=seed,
+                           pending=pending)
+        return _qnparego(model, X, Y, bounds, q=1, seed=seed,
+                         pending=pending)
     q_hv = min(q, max(0, round(hv_frac * q)))
     q_pe = q - q_hv
     if q_hv == 0:
