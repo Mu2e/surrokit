@@ -10,6 +10,7 @@ deterministic. The library never touches torch's global default dtype.
 """
 from __future__ import annotations
 
+import copy
 import logging
 
 import torch
@@ -19,6 +20,20 @@ from .problem import NotEnoughData, Problem
 log = logging.getLogger("surrokit")
 
 DEVICE = torch.device("cpu")
+
+# Multi-start hyperparameter fit. The default start (the prior mode) can
+# land in a local optimum of the marginal likelihood: a GP confidently
+# wrong about a region the loop then never samples again. FIT_EXTRA_STARTS
+# more fits start from hyperparameters drawn from their priors and the
+# best MAP objective wins. FIT_SEED seeds those draws inside a forked RNG,
+# so they are deterministic and never touch the caller's torch stream.
+FIT_EXTRA_STARTS = 4
+FIT_SEED = 0
+# An extra start replaces the default only if it lowers the MAP objective
+# (botorch's loss, per training point) by more than this: most fits reach
+# the same optimum from every start, and a 1e-6 "win" would change the
+# model where nothing was trapped.
+FIT_MIN_GAIN = 1e-3
 
 
 def to_f64(a) -> torch.Tensor:
@@ -118,6 +133,98 @@ def _input_transform(bounds, features):
         normalize=Normalize(d=full.shape[-1], bounds=full))
 
 
+def _map_loss(mll) -> float:
+    """The MAP objective: negative marginal log likelihood including the
+    hyperparameter prior terms, summed over outputs, in train mode on the
+    training data -- what botorch's fit minimizes. Leaves mll in train
+    mode."""
+    from botorch.optim.closures import get_loss_closure
+
+    mll.train()
+    with torch.no_grad():
+        return float(get_loss_closure(mll)().sum())
+
+
+def _fit_multistart(mll) -> None:
+    """Fit mll from 1 + FIT_EXTRA_STARTS starts, load the one with the
+    lowest MAP objective and leave mll in eval mode.
+
+    Start 0 is fit_gpytorch_mll exactly as a single fit runs it (prior
+    mode, botorch's own retry policy, the global RNG), so where it wins
+    the model is the single-start model. Starts 1.. reset to the initial
+    state and draw from the priors under torch.manual_seed(FIT_SEED) in a
+    forked RNG. The lowest objective wins, but start 0 is kept unless a
+    later start beats it by more than FIT_MIN_GAIN. A start that raises,
+    or that botorch judges unconverged, is skipped and counted;
+    ModelFittingError if every start fails.
+    """
+    from botorch.exceptions.errors import ModelFittingError
+    from botorch.fit import fit_gpytorch_mll
+    from botorch.optim.utils import sample_all_priors
+
+    init = copy.deepcopy(mll.state_dict())
+    fits = []      # (loss, start, state), in start order
+    failed = []    # (start, error)
+
+    def attempt(start, **kwargs):
+        try:
+            fit_gpytorch_mll(mll, **kwargs)
+        except (ModelFittingError, RuntimeError) as err:
+            failed.append((start, err))
+            log.warning("GP fit start %d failed: %s: %s", start,
+                        type(err).__name__, err)
+            return
+        fits.append((_map_loss(mll), start, copy.deepcopy(mll.state_dict())))
+
+    attempt(0)
+    with torch.random.fork_rng():
+        torch.manual_seed(FIT_SEED)
+        for start in range(1, 1 + FIT_EXTRA_STARTS):
+            mll.train()
+            mll.load_state_dict(init)
+            sample_all_priors(mll.model)
+            # One attempt: botorch's retry would redraw, and a failed
+            # start is counted, not retried.
+            attempt(start, max_attempts=1)
+    n_starts = 1 + FIT_EXTRA_STARTS
+    if not fits:
+        raise ModelFittingError(
+            f"all {n_starts} GP fit starts failed; last error: "
+            f"{type(failed[-1][1]).__name__}: {failed[-1][1]}"
+        ) from failed[-1][1]
+    # min() keeps the first of equal losses, i.e. the lowest start index.
+    loss, best, state = min(fits, key=lambda f: f[0])
+    if fits[0][1] == 0 and fits[0][0] - loss <= FIT_MIN_GAIN:
+        loss, best, state = fits[0]
+    mll.train()
+    mll.load_state_dict(state)
+    mll.eval()
+    default = (f"{fits[0][0]:.6g}" if fits[0][1] == 0 else "failed")
+    log.info("GP fit: start %d of %d won (0 = default); MAP objective "
+             "best=%.6g worst=%.6g default=%s; %d start(s) failed", best,
+             n_starts, loss, max(f[0] for f in fits), default, len(failed))
+
+
+def lengthscales(model):
+    """Fitted lengthscales as a numpy array (m, d_in): one row per output,
+    one column per GP input in the model's normalized input units (the
+    knobs, then any Problem.features). Raises TypeError for a covariance
+    that is not a single ARD kernel with one lengthscale per input."""
+    ck = getattr(model, "covar_module", None)
+    if ck is None or not getattr(ck, "has_lengthscale", False):
+        raise TypeError("lengthscales() needs a model whose covar_module "
+                        "has lengthscales (e.g. an ARD RBF kernel), got "
+                        f"{type(ck).__name__}")
+    ls = ck.lengthscale.detach()
+    m, d_in = model.num_outputs, ck.ard_num_dims
+    want = (1, d_in) if m == 1 else (m, 1, d_in)
+    if d_in is None or tuple(ls.shape) != want:
+        raise TypeError(f"unexpected lengthscale shape {tuple(ls.shape)} "
+                        f"for {m} output(s) and ard_num_dims={d_in}; "
+                        f"expected {want}")
+    return ls.reshape(m, d_in).cpu().numpy()
+
+
 def _fit_model(X, Y, bounds, noise, features=None):
     """Fit a SingleTaskGP (input Normalize + outcome Standardize).
 
@@ -125,8 +232,9 @@ def _fit_model(X, Y, bounds, noise, features=None):
     fixed-noise likelihood. Left free, MLL routinely over-fits noise on
     small replicated datasets and erases real optima; clients with
     replicate-measured noise should always pin it.
+
+    Hyperparameters are fit from several starts (_fit_multistart).
     """
-    from botorch.fit import fit_gpytorch_mll
     from botorch.models import SingleTaskGP
     from botorch.models.transforms.outcome import Standardize
     from gpytorch.mlls import ExactMarginalLogLikelihood
@@ -148,7 +256,7 @@ def _fit_model(X, Y, bounds, noise, features=None):
         outcome_transform=Standardize(m=m),
     )
     mll = ExactMarginalLogLikelihood(model.likelihood, model)
-    fit_gpytorch_mll(mll)
+    _fit_multistart(mll)
     # Noise audit: likelihood noise is standardized (x stdvs = raw);
     # fixed-noise carries (m, n) -- collapse to per-output.
     noise_t = model.likelihood.noise.detach()
@@ -159,6 +267,16 @@ def _fit_model(X, Y, bounds, noise, features=None):
     src = "FIXED (problem.noise)" if train_Yvar is not None else "MLL-fitted"
     log.info("GP noise sigma per output [%s]: raw=%s standardized=%s",
              src, raw, [f"{v:.3f}" for v in noise_std.tolist()])
+    # Lengthscale audit, in normalized input units (the knob box is
+    # [0, 1] per knob). Knobs x0.., then features f0.. (no names).
+    ls = lengthscales(model)
+    d = bounds.shape[-1]
+    names = ([f"x{i}" for i in range(d)]
+             + [f"f{j}" for j in range(ls.shape[1] - d)])
+    log.info("GP lengthscales per output (normalized inputs): %s",
+             "; ".join(f"out{i} " + " ".join(
+                 f"{n}={v:.3g}" for n, v in zip(names, row))
+                 for i, row in enumerate(ls)))
     return model
 
 

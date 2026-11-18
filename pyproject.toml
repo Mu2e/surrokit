@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surrokit"
-version = "0.1.0"
+version = "1.2.0"
 description = "Generic ask/tell GP surrogate engine: botorch fit/predict/ask with budget-constrained pickers"
 readme = "README.md"
 requires-python = ">=3.11"

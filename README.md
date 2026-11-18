@@ -77,6 +77,20 @@ while holding beam-flash damage under the deployed target's budget.
   `constrained_max` picker; `fit`, `predict`, and the other pickers ignore
   it. A GP-belief margin, not a measured one -- picks can still land over.
 - `fit(problem, X, Y) -> model`; `predict(model, X) -> (mean, sigma)`.
+  `fit` fits the GP hyperparameters from 5 starts: the default start
+  (the prior mode, exactly as a single fit), then 4 starts drawn from
+  the hyperparameter priors, and keeps the fit with the best MAP
+  objective; the default fit stays unless another start beats it by
+  more than `FIT_MIN_GAIN` (1e-3 per training point). The 4 draws use their own fixed seed in a forked RNG, so
+  `fit` is deterministic and leaves torch's global RNG as a single fit
+  would. A start that fails is skipped; `fit` raises only when all 5
+  fail. Each fit logs, at INFO, which start won, the noise and the
+  lengthscales.
+- `lengthscales(model) -> array (m, d_in)` — the fitted lengthscales,
+  one row per output, one column per GP input (the knobs, then any
+  `features`), in normalized units: each input's box spans 1, so a
+  lengthscale well above 1 means the GP treats that output as flat
+  along that input.
 - `ask(problem, X, Y, q=5, picker="hybrid", seed=0, pending=None,
   min_spacing=0.10, pool=16384, hv_frac=0.6) -> list[list]` —
   **stateless**: refits per call. Pickers: `qnehvi | qlnei | qnparego |
@@ -85,7 +99,13 @@ while holding beam-flash damage under the deployed target's budget.
   a Sobol draw. `pending` rows are conditioned on but never returned. `ask` seeds
   torch's GLOBAL RNG (`torch.manual_seed`) for stateless determinism;
   reseed after the call if you rely on ambient torch RNG state.
-- Errors: `InfeasibleError`, `NotEnoughData`, `ValueError` — the library
+  `hybrid` mixes `qnehvi` and `qnparego`: for q > 1, `round(hv_frac*q)`
+  picks come from `qnehvi` and the rest from `qnparego`; for q = 1 the
+  one pick comes from `qnehvi` with probability `hv_frac`, else
+  `qnparego`, decided by `seed` alone. Each acquisition is optimized
+  from 20 restarts over 1024 raw samples (Ax's defaults).
+- Errors: `InfeasibleError`, `NotEnoughData`, `ValueError`, and
+  botorch's `ModelFittingError` when every fit start fails — the library
   never prints (logger `"surrokit"`), reads the environment, or exits.
 
 ### Minimize a metric under a budget

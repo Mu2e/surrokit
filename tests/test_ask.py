@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import torch
 
@@ -117,6 +118,59 @@ class TestAskPickers(unittest.TestCase):
         picks = ask(PROB, X, Y, q=2, picker="qnehvi", seed=0,
                     pending=[[0.5, 5.0]])
         self.assertEqual(len(picks), 2)
+
+
+class TestHybridSinglePick(unittest.TestCase):
+    """q == 1: hybrid picks qnehvi with probability hv_frac, else qnparego
+    -- a function of the seed alone, off torch's global stream."""
+
+    SEEDS = [42 ^ i for i in range(200)]  # Mu2eBO's per-round derivation
+
+    def _choices(self, hv_frac):
+        from surrokit import pickers
+
+        def fake(name):
+            def pick(model, X, Y, bounds, q, seed, pending=None):
+                ran.append(name)
+                return torch.zeros(q, 2, dtype=torch.float64)
+            return pick
+
+        ran = []
+        with mock.patch.object(pickers, "_qnehvi", fake("qnehvi")), \
+                mock.patch.object(pickers, "_qnparego", fake("qnparego")):
+            for seed in self.SEEDS:
+                pickers._hybrid(None, None, None, None, q=1, seed=seed,
+                                hv_frac=hv_frac)
+        return ran
+
+    def test_share_follows_hv_frac(self):
+        ran = self._choices(0.6)
+        self.assertEqual(len(ran), len(self.SEEDS))
+        share = ran.count("qnehvi") / len(ran)
+        self.assertTrue(0.5 <= share <= 0.7, share)
+        self.assertIn("qnparego", ran)
+
+    def test_hv_frac_zero_and_one_are_pure(self):
+        self.assertEqual(set(self._choices(0.0)), {"qnparego"})
+        self.assertEqual(set(self._choices(1.0)), {"qnehvi"})
+
+    def test_draw_leaves_the_global_stream_alone(self):
+        torch.manual_seed(3)
+        before = torch.get_rng_state()
+        self._choices(0.6)
+        self.assertTrue(torch.equal(torch.get_rng_state(), before))
+
+    def test_end_to_end_matches_the_chosen_picker(self):
+        # Seed 42 draws 0.058 (< 0.6: qnehvi), seed 43 draws 0.632
+        # (qnparego); a q=1 hybrid pick IS that picker's pick.
+        X, Y = history(10)
+        for seed, picker in ((42, "qnehvi"), (43, "qnparego")):
+            with self.subTest(seed=seed):
+                a = ask(PROB, X, Y, q=1, picker="hybrid", seed=seed)
+                b = ask(PROB, X, Y, q=1, picker="hybrid", seed=seed)
+                self.assertEqual(a, b)
+                self.assertEqual(a, ask(PROB, X, Y, q=1, picker=picker,
+                                        seed=seed))
 
 
 class TestSamplingHelpers(unittest.TestCase):
