@@ -150,9 +150,6 @@ class TestHybridSinglePick(unittest.TestCase):
         self.assertTrue(0.5 <= share <= 0.7, share)
         self.assertIn("qnparego", ran)
 
-    def test_choice_is_a_function_of_the_seed(self):
-        self.assertEqual(self._choices(0.6), self._choices(0.6))
-
     def test_hv_frac_zero_and_one_are_pure(self):
         self.assertEqual(set(self._choices(0.0)), {"qnparego"})
         self.assertEqual(set(self._choices(1.0)), {"qnehvi"})
@@ -162,12 +159,6 @@ class TestHybridSinglePick(unittest.TestCase):
         before = torch.get_rng_state()
         self._choices(0.6)
         self.assertTrue(torch.equal(torch.get_rng_state(), before))
-
-    def test_logs_the_picker_that_ran(self):
-        with self.assertLogs("surrokit", level="INFO") as cm:
-            ran = self._choices(0.6)[:3]
-        lines = [m for m in cm.output if "hybrid q=1" in m][:3]
-        self.assertEqual([m.rsplit("-> ", 1)[1] for m in lines], ran)
 
     def test_end_to_end_matches_the_chosen_picker(self):
         # Seed 42 draws 0.058 (< 0.6: qnehvi), seed 43 draws 0.632

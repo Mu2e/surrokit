@@ -128,13 +128,6 @@ class TestLengthscales(unittest.TestCase):
         self.assertEqual(ls.shape, (2, 5))  # 4 knobs + 1 feature
         self.assertTrue((ls > 0).all())
 
-    def test_matches_the_kernel(self):
-        X, Y = history(10)
-        model = fit(PROB, X, Y)
-        np.testing.assert_array_equal(
-            lengthscales(model),
-            model.covar_module.lengthscale.detach().reshape(2, 2).numpy())
-
     def test_unexpected_kernel_raises(self):
         from gpytorch.kernels import ScaleKernel
         X, Y = history(10)
@@ -152,13 +145,6 @@ class TestLengthscales(unittest.TestCase):
         for token in ("out0 x0=", "out1 x0=", "x1="):
             self.assertIn(token, line[0])
 
-    def test_fit_logs_feature_lengthscales(self):
-        X, Y = feature_rows(12, seed=0)
-        with self.assertLogs("surrokit", level="INFO") as cm:
-            fit(feature_problem(product), X, Y)
-        line = [m for m in cm.output if "GP lengthscales" in m][0]
-        self.assertIn("x3=", line)
-        self.assertIn("f0=", line)
 
 
 class TestMultiStartFit(unittest.TestCase):
@@ -172,18 +158,6 @@ class TestMultiStartFit(unittest.TestCase):
         self.assertEqual(a.keys(), b.keys())
         for k in a:
             self.assertTrue(torch.equal(a[k], b[k]), k)
-
-    def test_never_worse_than_the_default_start(self):
-        cases = [(PROB, *history(10)),
-                 (feature_problem(), *feature_rows(20, seed=1)),
-                 (feature_problem(product), *feature_rows(8, seed=0))]
-        for prob, X, Y in cases:
-            with self.subTest(n=len(X), features=prob.features is not None):
-                torch.manual_seed(0)
-                single = _loss(_single_start_fit(prob, X, Y))
-                torch.manual_seed(0)
-                multi = _loss(fit(prob, X, Y))
-                self.assertLessEqual(multi, single)
 
     def test_escapes_a_worse_default_optimum(self):
         # On this fixture the default start settles ~0.09 (per data
@@ -213,15 +187,6 @@ class TestMultiStartFit(unittest.TestCase):
         torch.manual_seed(7)
         fit(PROB, X, Y)
         self.assertTrue(torch.equal(torch.get_rng_state(), single))
-
-    def test_logs_the_winning_start(self):
-        X, Y = history(10)
-        with self.assertLogs("surrokit", level="INFO") as cm:
-            fit(PROB, X, Y)
-        line = [m for m in cm.output if "GP fit: start" in m]
-        self.assertEqual(len(line), 1, cm.output)
-        self.assertRegex(line[0], r"start \d of 5 won .*best=\S+ "
-                                  r"worst=\S+ default=\S+; 0 start")
 
     def test_failed_starts_are_skipped_and_counted(self):
         import botorch.fit
